@@ -3,8 +3,15 @@ import { NextResponse } from "next/server"
 import { createServerClient } from "@supabase/ssr"
 import { updateSupabaseSession } from "@/lib/supabase/middleware"
 import { getSupabaseAnonKey, getSupabaseUrl } from "@/lib/supabase/env"
+import { rateLimitMiddleware } from "@/lib/rate-limit"
 
 export async function middleware(request: NextRequest) {
+  // Apply rate limiting to API routes
+  if (request.nextUrl.pathname.startsWith('/api/')) {
+    const rateLimitResponse = rateLimitMiddleware(request);
+    if (rateLimitResponse) return rateLimitResponse;
+  }
+
   const response = await updateSupabaseSession(request)
 
   const pathname = request.nextUrl.pathname
@@ -53,5 +60,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/login", "/onboarding", "/reset-password", "/accept-invite"],
+  matcher: ["/dashboard/:path*", "/login", "/onboarding", "/reset-password", "/accept-invite", "/api/:path*"],
 }

@@ -131,6 +131,10 @@ export async function POST(req: NextRequest) {
     }
 
     const toolNames = tools.map((t) => t.name)
+    // Ensure we have at least one tool name for the enum
+    if (toolNames.length === 0) {
+      return applyCookies(NextResponse.json({ error: "No valid tool names found" }, { status: 500 }))
+    }
     const toolNameEnum = z.enum(toolNames as [string, ...string[]])
 
     const systemPrompt = `You are a real-estate productivity assistant for a Luxembourg real-estate agency.
