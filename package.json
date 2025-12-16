@@ -3,10 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "predev": "npm --prefix mcp/real-estate-agent-server run build",
-    "prebuild": "npm --prefix mcp/real-estate-agent-server run build",
-    "build": "next build",
     "dev": "next dev",
+    "build": "next build",
     "lint": "eslint .",
     "start": "next start",
     "mcp:supabase": "node mcp/supabase-tools-server.mjs",
