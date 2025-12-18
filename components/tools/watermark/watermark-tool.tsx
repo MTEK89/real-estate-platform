@@ -15,15 +15,26 @@ import { Textarea } from "@/components/ui/textarea"
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
 import type { WatermarkOptions, WatermarkPosition } from "@/lib/watermark"
 import { applyWatermarkToImage } from "@/lib/watermark"
+import { useDataStore } from "@/lib/data-store"
 
 type SourceImage = {
   id: string
   file: File
   url: string
+  dataUrl?: string // Base64 data URL as fallback
 }
 
 function safeBaseName(name: string) {
   return name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9-_]+/g, "_").slice(0, 80) || "image"
+}
+
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -42,6 +53,8 @@ async function fileToBitmap(file: File) {
 }
 
 export function WatermarkTool() {
+  const { properties } = useDataStore()
+
   const [images, setImages] = useState<SourceImage[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [logoFile, setLogoFile] = useState<File | null>(null)
@@ -50,6 +63,8 @@ export function WatermarkTool() {
   const [isPreviewing, setIsPreviewing] = useState(false)
 
   const [isProcessing, setIsProcessing] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [selectedPropertyId, setSelectedPropertyId] = useState<string | null>(null)
 
   const [usage, setUsage] = useState<"marketing" | "mls">("marketing")
   const [preset, setPreset] = useState<"subtle_corner" | "visible_corner" | "diagonal_protection">("subtle_corner")
@@ -78,6 +93,7 @@ export function WatermarkTool() {
 
   useEffect(() => {
     return () => {
+      // Cleanup URLs when component unmounts only
       for (const img of images) URL.revokeObjectURL(img.url)
       if (logoUrl) URL.revokeObjectURL(logoUrl)
       if (previewUrl) URL.revokeObjectURL(previewUrl)
@@ -85,20 +101,49 @@ export function WatermarkTool() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const handleAddImages = (e: ChangeEvent<HTMLInputElement>) => {
+  const handleAddImages = async (e: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? [])
     if (!files.length) return
 
-    const additions: SourceImage[] = files
-      .filter((f) => f.type.startsWith("image/"))
-      .map((file) => ({
-        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        file,
-        url: URL.createObjectURL(file),
-      }))
+    // Generate both blob URLs and base64 data URLs for each image
+    const additions: SourceImage[] = (
+      await Promise.all(
+        files
+          .filter((f) => f.type.startsWith("image/"))
+          .map(async (file) => {
+            const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+            try {
+              console.log('Converting file to data URL:', file.name);
+              const dataUrl = await fileToDataUrl(file)
+              console.log('Successfully converted file to data URL:', file.name, 'length:', dataUrl.length);
+              return {
+                id,
+                file,
+                url: URL.createObjectURL(file),
+                dataUrl, // Base64 required
+              }
+            } catch (error) {
+              console.error('Failed to convert file to data URL:', file.name, error)
+              // Create a minimal 1x1 transparent placeholder if conversion fails
+              return {
+                id,
+                file,
+                url: URL.createObjectURL(file),
+                dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==',
+              }
+            }
+          })
+      )
+    ).filter(Boolean)
 
     setImages((prev) => {
       const next = [...prev, ...additions]
+      console.log('Images set:', next.map(img => ({
+        name: img.file.name,
+        hasDataUrl: !!img.dataUrl,
+        dataUrlLength: img.dataUrl?.length || 0,
+        url: img.url
+      })));
       if (!selectedId && next.length) setSelectedId(next[0]!.id)
       return next
     })
@@ -317,19 +362,130 @@ export function WatermarkTool() {
 
     setIsProcessing(true)
     toast.info("Processing images…")
+
     try {
-      const zip = new JSZip()
+      const processedBlobs: { blob: Blob; filename: string }[] = []
+
+      // Process all images
       for (const img of images) {
         const blob = await processOne(img)
-        zip.file(`${safeBaseName(img.file.name)}-watermarked.${outputExt}`, blob)
+        const filename = `${safeBaseName(img.file.name)}-watermarked.${outputExt}`
+        processedBlobs.push({ blob, filename })
+      }
+
+      // Create ZIP
+      const zip = new JSZip()
+      for (const { blob, filename } of processedBlobs) {
+        zip.file(filename, blob)
       }
       const zipBlob = await zip.generateAsync({ type: "blob" })
       downloadBlob(zipBlob, `watermarked_images_${Date.now()}.zip`)
-      toast.success("ZIP downloaded.")
+
+      // Also save to gallery (in background, don't block download)
+      toast.info("Saving to gallery…")
+      const form = new FormData()
+      for (const { blob, filename } of processedBlobs) {
+        const file = new File([blob], filename, { type: options.outputFormat })
+        form.append("files", file)
+      }
+      form.append("tags", JSON.stringify(["folder:watermark"]))
+      if (selectedPropertyId) {
+        form.append("propertyId", selectedPropertyId)
+      }
+
+      const res = await fetch("/api/v1/gallery/upload", { method: "POST", body: form })
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}))
+        toast.success(`ZIP downloaded. ${data?.created?.length ?? images.length} image(s) saved to gallery!`)
+      } else {
+        toast.warning("ZIP downloaded, but failed to save to gallery.")
+      }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to create ZIP.")
+      toast.error(error instanceof Error ? error.message : "Failed to process images.")
     } finally {
       setIsProcessing(false)
+    }
+  }
+
+  const handleSaveToGallery = async () => {
+    if (!selected) {
+      toast.error("Select an image first.")
+      return
+    }
+    if ((options.mode === "logo" || options.mode === "both") && !logoFile) {
+      toast.error("Add a logo first (or switch to text-only).")
+      return
+    }
+
+    setIsSaving(true)
+    try {
+      // 1. Process image
+      const blob = await processOne(selected)
+
+      // 2. Create File object with proper name
+      const filename = `${safeBaseName(selected.file.name)}-watermarked.${outputExt}`
+      const file = new File([blob], filename, { type: options.outputFormat })
+
+      // 3. Create FormData
+      const form = new FormData()
+      form.append("files", file)
+      form.append("tags", JSON.stringify(["folder:watermark"]))
+      if (selectedPropertyId) {
+        form.append("propertyId", selectedPropertyId)
+      }
+
+      // 4. Upload
+      const res = await fetch("/api/v1/gallery/upload", { method: "POST", body: form })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data?.error || "Failed to save to gallery")
+
+      toast.success("Saved to gallery!")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save to gallery")
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const handleSaveAllToGallery = async () => {
+    if (!images.length) {
+      toast.error("Add images first.")
+      return
+    }
+    if ((options.mode === "logo" || options.mode === "both") && !logoFile) {
+      toast.error("Add a logo first (or switch to text-only).")
+      return
+    }
+
+    setIsSaving(true)
+    toast.info("Processing and saving images…")
+
+    try {
+      // 1. Process all images
+      const form = new FormData()
+      for (const img of images) {
+        const blob = await processOne(img)
+        const filename = `${safeBaseName(img.file.name)}-watermarked.${outputExt}`
+        const file = new File([blob], filename, { type: options.outputFormat })
+        form.append("files", file)
+      }
+
+      // 2. Add metadata
+      form.append("tags", JSON.stringify(["folder:watermark"]))
+      if (selectedPropertyId) {
+        form.append("propertyId", selectedPropertyId)
+      }
+
+      // 3. Upload
+      const res = await fetch("/api/v1/gallery/upload", { method: "POST", body: form })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data?.error || "Failed to save to gallery")
+
+      toast.success(`Saved ${data?.created?.length ?? images.length} image(s) to gallery!`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save to gallery")
+    } finally {
+      setIsSaving(false)
     }
   }
 
@@ -377,7 +533,31 @@ export function WatermarkTool() {
                       ].join(" ")}
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={img.url} alt={img.file.name} className="h-20 w-full object-cover" />
+                      <img
+                        src={img.url}
+                        alt={img.file.name}
+                        className="h-20 w-full object-cover"
+                        onError={(e) => {
+                          const target = e.target as HTMLImageElement;
+                          console.error('Blob URL failed to load:', img.url, e);
+                          console.log('Image has dataUrl?', !!img.dataUrl);
+                          console.log('DataUrl length:', img.dataUrl?.length || 0);
+
+                          // Try base64 fallback if available
+                          if (img.dataUrl) {
+                            console.log('Trying base64 fallback for:', img.file.name);
+                            target.src = img.dataUrl;
+                            return;
+                          }
+
+                          console.error('No base64 fallback available for:', img.file.name);
+                          target.style.display = 'none';
+                          target.parentElement!.innerHTML = `<div class="h-20 w-full flex items-center justify-center text-xs text-muted-foreground border rounded">Image failed</div>`;
+                        }}
+                        onLoad={(e) => {
+                          console.log('Image loaded successfully:', img.file.name);
+                        }}
+                      />
                     </button>
                   ))}
                 </div>
@@ -508,7 +688,20 @@ export function WatermarkTool() {
                 {logoUrl ? (
                   <div className="mt-2 flex items-center gap-3 rounded-md border bg-muted/20 p-3">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={logoUrl} alt="Logo" className="h-10 w-10 rounded object-contain" />
+                    <img
+                      src={logoUrl}
+                      alt="Logo"
+                      className="h-10 w-10 rounded object-contain"
+                      onError={(e) => {
+                        console.error('Logo failed to load:', logoUrl, e);
+                        const target = e.target as HTMLImageElement;
+                        target.style.display = 'none';
+                        target.parentElement!.innerHTML = `<div class="h-10 w-10 flex items-center justify-center text-xs text-muted-foreground border rounded">Logo failed</div>`;
+                      }}
+                      onLoad={() => {
+                        console.log('Logo loaded successfully:', logoUrl);
+                      }}
+                    />
                     <div className="text-xs text-muted-foreground">Logo will be applied on export.</div>
                   </div>
                 ) : null}
@@ -732,15 +925,54 @@ export function WatermarkTool() {
               </AccordionItem>
             </Accordion>
 
-            <div className="flex flex-col gap-3 sm:flex-row">
-              <Button onClick={handleDownloadSelected} disabled={isProcessing || !selected}>
-                {isProcessing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
-                Download selected
-              </Button>
-              <Button variant="outline" onClick={handleDownloadAllZip} disabled={isProcessing || !images.length}>
-                <Download className="mr-2 h-4 w-4" />
-                Download all (.zip)
-              </Button>
+            <div className="space-y-3">
+              {properties.length > 0 && (
+                <div className="space-y-2">
+                  <Label htmlFor="wm-property">Link to property (optional)</Label>
+                  <Select value={selectedPropertyId || "none"} onValueChange={(v) => setSelectedPropertyId(v === "none" ? null : v)}>
+                    <SelectTrigger id="wm-property">
+                      <SelectValue placeholder="None" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None</SelectItem>
+                      {properties.map((p) => {
+                        const addressStr = typeof p.address === 'string'
+                          ? p.address
+                          : `${p.address?.street || ''} ${p.address?.city || ''}`.trim()
+                        return (
+                          <SelectItem key={p.id} value={p.id}>
+                            {addressStr || `Property ${p.id}`}
+                          </SelectItem>
+                        )
+                      })}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
+              {/* Single image actions */}
+              <div className="flex gap-2">
+                <Button onClick={handleDownloadSelected} disabled={isProcessing || isSaving || !selected} className="flex-1">
+                  {isProcessing ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+                  Download
+                </Button>
+                <Button variant="outline" onClick={handleSaveToGallery} disabled={isProcessing || isSaving || !selected} className="flex-1">
+                  {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImageIcon className="mr-2 h-4 w-4" />}
+                  Save to Gallery
+                </Button>
+              </div>
+
+              {/* Batch actions */}
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={handleDownloadAllZip} disabled={isProcessing || isSaving || !images.length} className="flex-1">
+                  <Download className="mr-2 h-4 w-4" />
+                  Download All (.zip)
+                </Button>
+                <Button variant="outline" onClick={handleSaveAllToGallery} disabled={isProcessing || isSaving || !images.length} className="flex-1">
+                  {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImageIcon className="mr-2 h-4 w-4" />}
+                  Save All to Gallery
+                </Button>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -759,6 +991,26 @@ export function WatermarkTool() {
                 src={previewUrl || selected.url}
                 alt="Selected"
                 className="h-auto w-full object-contain"
+                onError={(e) => {
+                  const target = e.target as HTMLImageElement;
+                  console.error('Preview image failed to load:', previewUrl || selected.url, e);
+                  console.log('Selected image has dataUrl?', !!selected.dataUrl);
+                  console.log('PreviewUrl exists?', !!previewUrl);
+
+                  // Try base64 fallback if available
+                  if (!previewUrl && selected.dataUrl) {
+                    console.log('Trying base64 fallback for preview:', selected.file.name);
+                    target.src = selected.dataUrl;
+                    return;
+                  }
+
+                  console.error('No fallback available for preview:', selected.file.name);
+                  target.style.display = 'none';
+                  target.parentElement!.innerHTML = `<div class="min-h-[420px] flex items-center justify-center text-sm text-muted-foreground">Preview image failed to load</div>`;
+                }}
+                onLoad={(e) => {
+                  console.log('Preview image loaded successfully:', selected.file.name);
+                }}
               />
               {isPreviewing ? (
                 <div className="absolute inset-0 flex items-center justify-center bg-background/40 text-xs text-muted-foreground">

@@ -19,12 +19,17 @@ export async function GET(req: NextRequest) {
   let query = supabase.from("photos").select("*").eq("agency_id", tenant.agencyId).order("created_at", { ascending: false })
   if (propertyId && propertyId !== "all") query = query.eq("property_id", propertyId)
   if (folder && folder !== "all") {
-    // PostgREST array filters require quoting when values include special chars like ":".
-    // We keep folder tags as "folder:<name>" but use a raw `cs` filter with quoted array literal.
+    // PostgREST array filters require quoting when values include special chars.
+    // Folder tags are stored as "folder:<name>", so we filter by that exact tag.
     const safeFolder = folder.trim().toLowerCase()
+    // Only apply filter if folder name is valid (alphanumeric + underscore)
     if (/^[a-z0-9_]+$/.test(safeFolder)) {
-      const tag = `folder:${safeFolder}`.replace(/"/g, '\\"')
-      query = query.filter("tags", "cs", `{"${tag}"}`)
+      const tag = `folder:${safeFolder}`
+      // Use contains filter with proper escaping
+      query = query.filter("tags", "cs", `"${tag}"`)
+    } else {
+      // If folder parameter is invalid, return no results (invalid filter request)
+      return applyCookies(NextResponse.json([], { status: 200 }))
     }
   }
 
@@ -35,14 +40,24 @@ export async function GET(req: NextRequest) {
   const admin = getSupabaseAdmin()
   const rows = await Promise.all(
     (data ?? []).map(async (p: any) => {
-      const { data: signed } = await admin.storage.from(BUCKET).createSignedUrl(p.path, 60 * 30)
+      let url: string | null = null
+      if (p.path) {
+        try {
+          const { data: signed, error: signError } = await admin.storage.from(BUCKET).createSignedUrl(p.path, 60 * 30)
+          if (!signError && signed?.signedUrl) {
+            url = signed.signedUrl
+          }
+        } catch (err) {
+          console.error(`[gallery] Failed to create signed URL for ${p.path}:`, err)
+        }
+      }
       return {
         id: p.id,
         agencyId: p.agency_id,
         propertyId: p.property_id,
         filename: p.filename,
         path: p.path,
-        url: signed?.signedUrl || null,
+        url,
         contentType: p.content_type,
         size: p.size,
         width: p.width,

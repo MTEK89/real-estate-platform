@@ -1,19 +1,22 @@
 import { fileURLToPath } from "url"
-import { dirname } from "path"
+import { dirname, resolve } from "path"
 
 const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(import.meta.url)
+const __dirname = dirname(__filename)
+const projectRoot = resolve(__dirname)
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   typescript: {
     ignoreBuildErrors: true,
   },
+  // Pin Turbopack's workspace root so it can always resolve `next`/deps from the repo,
+  // even if it mistakenly infers a nested directory (e.g. `./app`) as the project root.
+  turbopack: {
+    root: projectRoot,
+  },
   images: {
     unoptimized: true,
-  },
-  turbopack: {
-    root: __dirname,
   },
 
   // Security headers
@@ -46,11 +49,14 @@ const nextConfig = {
             key: 'Content-Security-Policy',
             value: [
               "default-src 'self'",
-              "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
+              // Allow Vercel Analytics script loader.
+              "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://va.vercel-scripts.com",
+              "script-src-elem 'self' 'unsafe-eval' 'unsafe-inline' https://va.vercel-scripts.com",
               "style-src 'self' 'unsafe-inline'",
-              "img-src 'self' data: https:",
+              "img-src 'self' data: blob: https:",
               "font-src 'self'",
-              "connect-src 'self' https://api.openai.com https://*.supabase.co",
+              // Allow Analytics beacons in addition to app APIs.
+              "connect-src 'self' https://api.openai.com https://*.supabase.co https://va.vercel-scripts.com https://vitals.vercel-insights.com",
               "frame-src 'none'",
             ].join('; '),
           },

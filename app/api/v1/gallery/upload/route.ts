@@ -80,12 +80,21 @@ export async function POST(req: NextRequest) {
 
     if (insertError || !row) return applyCookies(NextResponse.json({ error: insertError?.message || "Insert failed" }, { status: 500 }))
 
-    const { data: signed } = await admin.storage.from(BUCKET).createSignedUrl(path, 60 * 30)
+    let signedUrl: string | null = null
+    try {
+      const { data: signed, error: signError } = await admin.storage.from(BUCKET).createSignedUrl(path, 60 * 30)
+      if (!signError && signed?.signedUrl) {
+        signedUrl = signed.signedUrl
+      }
+    } catch (err) {
+      console.error(`[upload] Failed to create signed URL for ${path}:`, err)
+    }
+
     created.push({
       id: row.id,
       filename: row.filename,
       path: row.path,
-      url: signed?.signedUrl || null,
+      url: signedUrl,
       propertyId: row.property_id,
       createdAt: row.created_at,
     })

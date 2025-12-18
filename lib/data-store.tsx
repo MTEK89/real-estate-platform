@@ -96,6 +96,7 @@ interface DataStore {
   updateTask: (id: string, updates: Partial<Task>) => void
   deleteTask: (id: string) => void
   completeTask: (id: string) => void
+  refreshTasks: () => Promise<void>
 
   // Contract actions
   addContract: (contract: Omit<Contract, "id" | "createdAt">) => Contract
@@ -189,8 +190,8 @@ export function DataStoreProvider({ children }: { children: React.ReactNode }) {
   const [contracts, setContracts] = useState<Contract[]>(initialContracts)
   const [operationalDocuments, setOperationalDocuments] = useState<OperationalDocument[]>(initialOperationalDocuments)
   const [marketingDocuments, setMarketingDocuments] = useState<CommercialDocument[]>(initialCommercialDocuments)
-  const [commissions, setCommissions] = useState<Commission[]>(initialCommissions)
-  const [invoices, setInvoices] = useState<Invoice[]>(initialInvoices)
+  const [commissions, setCommissions] = useState<Commission[]>([])
+  const [invoices, setInvoices] = useState<Invoice[]>([])
   const [campaigns, setCampaigns] = useState<MarketingCampaign[]>(initialCampaigns)
   const [emails, setEmails] = useState<Email[]>(initialEmails)
   const [emailAccounts, setEmailAccounts] = useState<EmailAccount[]>(initialEmailAccounts)
@@ -223,41 +224,66 @@ export function DataStoreProvider({ children }: { children: React.ReactNode }) {
           setCurrentAgencyId(bootJson.agencyId ?? null)
         }
 
-        const [cRes, pRes, tRes, vRes, ctRes, invRes, inspRes, opRes, mdRes] = await Promise.all([
-          fetch("/api/v1/contacts"),
-          fetch("/api/v1/properties"),
-          fetch("/api/v1/tasks"),
-          fetch("/api/v1/visits"),
-          fetch("/api/v1/contracts"),
-          fetch("/api/v1/invoices"),
-          fetch("/api/v1/inspections"),
-          fetch("/api/v1/operational-documents"),
-          fetch("/api/v1/marketing-documents"),
+        const [cRes, pRes, tRes, vRes, ctRes, comRes, invRes, inspRes, opRes, mdRes] = await Promise.all([
+          fetch("/api/v1/contacts", { credentials: "include" }),
+          fetch("/api/v1/properties", { credentials: "include" }),
+          fetch("/api/v1/tasks", { credentials: "include" }),
+          fetch("/api/v1/visits", { credentials: "include" }),
+          fetch("/api/v1/contracts", { credentials: "include" }),
+          fetch("/api/v1/commissions", { credentials: "include" }),
+          fetch("/api/v1/invoices", { credentials: "include" }),
+          fetch("/api/v1/inspections", { credentials: "include" }),
+          fetch("/api/v1/operational-documents", { credentials: "include" }),
+          fetch("/api/v1/marketing-documents", { credentials: "include" }),
         ])
 
-        if (
-          !cRes.ok ||
-          !pRes.ok ||
-          !tRes.ok ||
-          !vRes.ok ||
-          !ctRes.ok ||
-          !invRes.ok ||
-          !inspRes.ok ||
-          !opRes.ok ||
-          !mdRes.ok
-        )
-          throw new Error("data fetch failed")
+        // Log which endpoints failed and parse responses
+        const endpoints = [
+          { name: "contacts", res: cRes },
+          { name: "properties", res: pRes },
+          { name: "tasks", res: tRes },
+          { name: "visits", res: vRes },
+          { name: "contracts", res: ctRes },
+          { name: "commissions", res: comRes, optional: true },
+          { name: "invoices", res: invRes },
+          { name: "inspections", res: inspRes },
+          { name: "operational-documents", res: opRes },
+          { name: "marketing-documents", res: mdRes },
+        ]
 
-        const [c, p, t, v, ct, inv, insp, op, md] = await Promise.all([
-          cRes.json(),
-          pRes.json(),
-          tRes.json(),
-          vRes.json(),
-          ctRes.json(),
-          invRes.json(),
-          inspRes.json(),
-          opRes.json(),
-          mdRes.json(),
+        const failedEndpoints = endpoints.filter((e) => !e.res.ok).map((e) => e.name)
+        const criticalFailed = failedEndpoints.filter((name) => !endpoints.find((e) => e.name === name && e.optional))
+
+        if (criticalFailed.length > 0) {
+          console.warn("[DataStore] Failed to fetch from critical endpoints:", criticalFailed)
+          throw new Error(`data fetch failed: ${criticalFailed.join(", ")}`)
+        }
+        if (failedEndpoints.length > 0) {
+          console.warn("[DataStore] Failed to fetch from optional endpoints:", failedEndpoints)
+        }
+
+        // Parse responses, handling both success and failure
+        const parseJson = async (res: Response) => {
+          if (!res.ok) return []
+          try {
+            const data = await res.json()
+            return Array.isArray(data) ? data : []
+          } catch {
+            return []
+          }
+        }
+
+        const [c, p, t, v, ct, com, inv, insp, op, md] = await Promise.all([
+          parseJson(cRes),
+          parseJson(pRes),
+          parseJson(tRes),
+          parseJson(vRes),
+          parseJson(ctRes),
+          parseJson(comRes),
+          parseJson(invRes),
+          parseJson(inspRes),
+          parseJson(opRes),
+          parseJson(mdRes),
         ])
 
         if (cancelled) return
@@ -266,6 +292,7 @@ export function DataStoreProvider({ children }: { children: React.ReactNode }) {
         if (Array.isArray(t)) setTasks(t as Task[])
         if (Array.isArray(v)) setVisits(v as Visit[])
         if (Array.isArray(ct)) setContracts(ct as Contract[])
+        if (Array.isArray(com)) setCommissions(com as Commission[])
         if (Array.isArray(inv)) setInvoices(inv as Invoice[])
         if (Array.isArray(insp)) setInspections(insp as Inspection[])
         if (Array.isArray(op)) setOperationalDocuments(op as OperationalDocument[])
@@ -394,6 +421,18 @@ export function DataStoreProvider({ children }: { children: React.ReactNode }) {
     },
     [jsonHeaders, persistenceMode],
   )
+
+  const refreshTasks = useCallback(async () => {
+    if (persistenceMode !== "server") return
+    try {
+      const res = await fetch("/api/v1/tasks")
+      if (!res.ok) return
+      const data = await res.json()
+      if (Array.isArray(data)) setTasks(data as Task[])
+    } catch {
+      // ignore
+    }
+  }, [persistenceMode])
 
   const createContactInternal = useCallback(
     (contact: Contact) => {
@@ -597,6 +636,26 @@ export function DataStoreProvider({ children }: { children: React.ReactNode }) {
         .then((serverInvoice) => {
           if (!serverInvoice) return
           setInvoices((prev) => prev.map((i) => (i.id === invoice.id ? serverInvoice : i)))
+        })
+        .catch(() => {})
+    },
+    [jsonHeaders, persistenceMode],
+  )
+
+  const updateCommissionInternal = useCallback(
+    (id: string, updates: Partial<Commission>) => {
+      setCommissions((prev) => prev.map((c) => (c.id === id ? { ...c, ...updates } : c)))
+
+      if (persistenceMode !== "server") return
+      void fetch(`/api/v1/commissions/${id}`, {
+        method: "PATCH",
+        headers: jsonHeaders,
+        body: JSON.stringify(updates),
+      })
+        .then(async (r) => (r.ok ? (r.json() as Promise<Commission>) : null))
+        .then((serverCommission) => {
+          if (!serverCommission) return
+          setCommissions((prev) => prev.map((c) => (c.id === id ? serverCommission : c)))
         })
         .catch(() => {})
     },
@@ -1131,14 +1190,12 @@ export function DataStoreProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const updateCommission = useCallback((id: string, updates: Partial<Commission>) => {
-    setCommissions((prev) => prev.map((c) => (c.id === id ? { ...c, ...updates } : c)))
-  }, [])
+    updateCommissionInternal(id, updates)
+  }, [updateCommissionInternal])
 
   const markCommissionPaid = useCallback((id: string) => {
-    setCommissions((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, status: "paid", paidAt: new Date().toISOString() } : c)),
-    )
-  }, [])
+    updateCommissionInternal(id, { status: "paid", paidAt: new Date().toISOString() })
+  }, [updateCommissionInternal])
 
   // Invoice actions
   const addInvoice = useCallback((invoice: Omit<Invoice, "id" | "createdAt">): Invoice => {
@@ -1424,6 +1481,8 @@ export function DataStoreProvider({ children }: { children: React.ReactNode }) {
     getUnreadEmailCount,
     getPendingTaskCount,
     getUpcomingVisitsToday,
+
+    refreshTasks,
   }
 
   return <DataStoreContext.Provider value={value}>{children}</DataStoreContext.Provider>
